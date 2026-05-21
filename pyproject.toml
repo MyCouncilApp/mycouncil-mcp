@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mycouncil"
+version = "0.1.0"
+description = "MCP server for myCouncil — run multi-LLM debates from Claude Code, Claude Desktop, Cursor, and other MCP clients."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+    { name = "myCouncil", email = "support@mycouncil.xyz" },
+]
+keywords = ["mcp", "llm", "debate", "council", "claude"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development",
+]
+dependencies = [
+    "mcp>=1.2.0",
+    "httpx>=0.27.0",
+]
+
+[project.urls]
+Homepage = "https://app.mycouncil.xyz"
+Repository = "https://github.com/MyCouncilApp/mycouncil-mcp"
+"API Docs" = "https://app.mycouncil.xyz/api/v1/docs"
+
+[project.scripts]
+mycouncil = "mycouncil.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mycouncil"]
