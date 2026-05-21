@@ -80,6 +80,25 @@ class MyCouncilClient:
         _raise_for_status(r)
         return r.json()
 
+    async def list_roles(
+        self, scope: str | None = None, include_drafts: bool = False
+    ) -> list[dict]:
+        """Fetch accessible expert roles (system + own + team).
+
+        Returns the raw role list from the server, optionally filtered by
+        scope. Each role has: id, name, description_markdown, category,
+        scope, status, etc.
+        """
+        params: dict[str, str] = {"include_drafts": "true" if include_drafts else "false"}
+        r = await self._client.get("/api/roles", params=params)
+        _raise_for_status(r)
+        payload = r.json()
+        roles = payload.get("roles") if isinstance(payload, dict) else payload
+        roles = roles or []
+        if scope:
+            roles = [r for r in roles if r.get("scope") == scope]
+        return roles
+
     async def list_models(self) -> list[dict]:
         """Fetch the available-models whitelist with tier metadata.
 

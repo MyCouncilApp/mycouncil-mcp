@@ -7,6 +7,15 @@ Thin wrapper over the public [myCouncil API](https://app.mycouncil.xyz/api/v1/do
 Rounds, billing, and auto-config mode live on your account — the MCP server
 just relays calls.
 
+## What's new
+
+**0.2.0** — added `mycouncil_info` (orientation guide agents can call once
+per session) and `mycouncil_list_roles` (browse the curated expert-role
+catalogue when composing a custom council). 8 tools total now.
+
+**0.1.0** — initial release: 6 tools, tier abstraction (`fast` / `balanced`
+/ `deep`), model IDs hidden from the agent.
+
 ## Setup
 
 1. Sign up at <https://app.mycouncil.xyz> (10 free rounds).
@@ -46,7 +55,9 @@ In `claude_desktop_config.json` or `~/.cursor/mcp.json`:
 
 | Tool | What it does |
 |---|---|
+| `mycouncil_info` | One-call agent orientation: flows, tier semantics, quota notes. Call once at the start of a session. |
 | `mycouncil_balance` | Remaining rounds + current auto-config mode. |
+| `mycouncil_list_roles` | List curated system + own + team expert roles. Use their `id` as `role_preset` when composing a custom council. |
 | `mycouncil_auto_config` | Generate a session config from a query. Returns roles + temperatures + `tier`. **Concrete model IDs are not exposed** — the planner and the server pick them based on the tier. |
 | `mycouncil_debate_start` | Start a debate, return `job_id`. Accepts a config returned by `mycouncil_auto_config` (with or without edits). |
 | `mycouncil_debate_status` | Poll a debate by `job_id`. |

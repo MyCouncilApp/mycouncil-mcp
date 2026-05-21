@@ -19,6 +19,109 @@ TERMINAL_STATUSES = {"complete", "failed"}
 mcp = FastMCP("mycouncil")
 
 
+# Orientation guide for agents. Returned by mycouncil_info. Kept as a
+# module constant so it's easy to update in one place.
+_INFO_GUIDE = """\
+# myCouncil — quick guide for agents
+
+Run multi-LLM debates: 2-5 expert models discuss a user's question across
+3 stages (individual takes -> anonymous peer review -> chairman synthesis).
+
+## When to call it
+
+Use myCouncil when the answer benefits from multiple perspectives:
+decisions with trade-offs, strategy, design choices, risk analysis,
+multi-factor comparisons. Skip for trivial Q&A or things you can answer
+directly without external input.
+
+## Tools at a glance
+
+| Tool | When to use |
+|---|---|
+| `mycouncil_balance` | Quota check before starting — costs nothing. |
+| `mycouncil_info` | This guide. Read once per session. |
+| `mycouncil_list_roles` | Browse the curated expert-role catalogue when composing a custom council. |
+| `mycouncil_auto_config` | Preview the planner's choice (roles + tier) before running. |
+| `mycouncil_debate` | Blocking — one call, returns the finished result. The default path. |
+| `mycouncil_debate_start` + `mycouncil_debate_status` | Async — fire and poll, useful for long debates. |
+| `mycouncil_share` | Export an existing conversation to a public link or a PDF. |
+
+## Three flows
+
+**1. Default (zero-config).** Simplest, use it 90% of the time:
+```
+mycouncil_debate(content="<the user's question>")
+```
+Server picks tier, roles, and models. Returns a PDF path by default
+(override with `return_as="transcript"` if you want the raw JSON).
+
+**2. Preview + tweak.** When the user wants to see what'll be discussed
+or you want to escalate the tier:
+```
+result = mycouncil_auto_config(content="<question>")
+# inspect result["config"]["tier"], result["config"]["experts"],
+# result["observation"]. Optionally edit config["tier"] or roles.
+mycouncil_debate(content="<same>", config=result["config"])
+```
+
+**3. Custom council.** When the user explicitly names roles they want:
+```
+roles = mycouncil_list_roles()
+# pick role IDs from roles["roles"][i]["id"] (e.g. "technology", "legal")
+config = {
+    "session_type": 1,
+    "tier": "balanced",
+    "experts": [
+        {"role_name": "Tech Lead", "role_preset": "technology", "temperature": 0.4},
+        {"role_name": "Legal Reviewer", "role_preset": "legal", "temperature": 0.3},
+    ],
+    "chairman": {"temperature": 0.5},
+}
+mycouncil_debate(content="<question>", config=config)
+```
+
+For roles not in the catalogue, use `role_preset="custom"` plus a full
+`role_description` (markdown). Don't write custom descriptions if a
+preset fits — it wastes tokens and the curated descriptions are higher
+quality.
+
+## Tier (operating mode)
+
+`fast` / `balanced` / `deep` — describes how much time the council
+spends, not a quality rank. The planner picks one by default. **Do not
+escalate to `deep` reflexively** — it's much more expensive and meant
+for high-stakes / irreversible decisions. `deep` is only available in
+`advanced` auto-config mode; check `mycouncil_balance`.
+
+## Quota awareness
+
+- 1 round per debate (refunded if the server fails before stage 1).
+- `mycouncil_auto_config` is free in `standard` mode, **1 round in
+  `advanced`**. If you're going to call `mycouncil_debate` right after
+  with the same content, skip auto_config and let debate run it
+  internally (avoids double-billing).
+- Type-2 debates (adversarial, set by the planner) pre-reserve up to
+  `max_rounds` rounds. Unused rounds are refunded after the debate.
+
+## Result formats (mycouncil_debate)
+
+- `return_as="pdf"` (default) — saves to `save_path` or
+  `./mycouncil-<id>-<timestamp>.pdf`. The user can open the file.
+- `return_as="transcript"` — full JSON: stage1 takes, stage2 peer
+  reviews, stage3 synthesis. Use when you need to reason over the
+  result, not just hand it to the user.
+- `return_as="link"` — generates a public share URL. WARNING: the URL
+  is publicly accessible to anyone who has it. Confirm with the user
+  before using.
+
+## Timeouts
+
+Default 20 minutes for blocking `mycouncil_debate`. Most debates finish
+in 5-15 min. Do not lower the timeout below 20 — large councils with
+files / deep tier can push past 15 min.
+"""
+
+
 def _default_pdf_path(conversation_id: str) -> Path:
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     short = conversation_id[:8] if conversation_id else "debate"
@@ -80,6 +183,18 @@ async def _prepare_config_for_debate(
 
 
 @mcp.tool()
+async def mycouncil_info() -> dict[str, Any]:
+    """Orientation for agents — read this once at the start of a session.
+
+    Returns a short guide covering when to use myCouncil, the three
+    typical flows (zero-config / preview-and-tweak / custom council),
+    the tier system, quota awareness, and result formats. Self-contained;
+    you do not need to read the per-tool descriptions if you read this.
+    """
+    return {"guide": _INFO_GUIDE}
+
+
+@mcp.tool()
 async def mycouncil_balance() -> dict[str, Any]:
     """Return remaining rounds (quota) and the account's current
     auto-config mode (`standard` is free, `advanced` costs 1 round per
@@ -88,6 +203,42 @@ async def mycouncil_balance() -> dict[str, Any]:
     try:
         async with MyCouncilClient() as client:
             return await client.balance()
+    except Exception as exc:
+        return _error_payload(exc)
+
+
+@mcp.tool()
+async def mycouncil_list_roles(
+    scope: Literal["all", "system", "user", "team", "public"] = "all",
+) -> dict[str, Any]:
+    """List expert roles available for composing custom debate configs.
+
+    The server returns curated system roles plus any custom roles the
+    account or its team has saved. Use a role's `id` as `role_preset`
+    (or `role_id`) when composing a config for
+    `mycouncil_debate(_start)`.
+
+    If no preset fits the user's question, use `role_preset="custom"`
+    plus a full `role_description` markdown — but only when nothing in
+    the catalogue is close, otherwise it wastes tokens.
+
+    Args:
+        scope: Filter by where the role comes from.
+            "system" — curated public catalogue.
+            "user" — the account's own saved roles.
+            "team" — roles shared with the account's team.
+            "public" — public roles published by other users.
+            "all" — everything accessible (default).
+
+    Returns a dict with `roles`: list of {id, name, description_markdown,
+    category, scope, status, ...}.
+    """
+    try:
+        async with MyCouncilClient() as client:
+            roles = await client.list_roles(
+                scope=None if scope == "all" else scope
+            )
+        return {"roles": roles, "count": len(roles), "scope": scope}
     except Exception as exc:
         return _error_payload(exc)
 
