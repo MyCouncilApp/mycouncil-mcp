@@ -9,6 +9,13 @@ just relays calls.
 
 ## What's new
 
+**0.3.0** — optional **streamable-http** transport
+(`--transport streamable-http`). Run the server as one long-lived HTTP
+service instead of a per-client stdio process — the async server handles
+concurrent debates natively (no stdio→HTTP bridge in front). Identity is
+unchanged: a single `MYCOUNCIL_API_KEY` from the environment. stdio stays
+the default. See [Running over streamable HTTP](#running-over-streamable-http).
+
 **0.2.0** — added `mycouncil_info` (orientation guide agents can call once
 per session) and `mycouncil_list_roles` (browse the curated expert-role
 catalogue when composing a custom council). 8 tools total now.
@@ -50,6 +57,63 @@ In `claude_desktop_config.json` or `~/.cursor/mcp.json`:
   }
 }
 ```
+
+## Running over streamable HTTP
+
+By default the server runs over **stdio** — one process per client, spawned
+by the MCP client. You can instead run it as a single long-lived
+**streamable-http** service:
+
+```bash
+MYCOUNCIL_API_KEY=mc_your_key_here \
+  uvx mycouncil --transport streamable-http --host 127.0.0.1 --port 8000
+```
+
+The endpoint is then `http://<host>:<port>/mcp`. Point any streamable-http
+MCP client at it:
+
+```json
+{
+  "mcpServers": {
+    "mycouncil": {
+      "type": "streamable-http",
+      "url": "http://127.0.0.1:8000/mcp"
+    }
+  }
+}
+```
+
+Or, with the Claude Code CLI (no env var on the client — the key lives with
+the running service):
+
+```bash
+claude mcp add --transport http mycouncil http://127.0.0.1:8000/mcp
+```
+
+This is **single-identity**: every request uses the one `MYCOUNCIL_API_KEY`
+the process was started with — all callers share that account's rounds and
+balance. It is not multi-tenant; it just lets one process speak HTTP
+natively so concurrent debates run on the async event loop without a
+stdio→HTTP bridge funnelling them through a single pipe. The transport runs
+in stateless mode (a fresh transport per request), so there is no session
+affinity to manage.
+
+Notes:
+
+- **Binding beyond localhost.** The default bind is `127.0.0.1`. If you set
+  `--host 0.0.0.0` (e.g. behind a reverse proxy), the localhost-only
+  DNS-rebinding guard is relaxed automatically — put the service behind your
+  own proxy / network controls, since anyone who can reach the port spends
+  the configured key's quota.
+- **Long-running debates.** Blocking `mycouncil_debate` holds the HTTP
+  response open while it polls (up to `timeout_minutes`, default 20) with no
+  bytes flowing. Raise idle timeouts on any intermediary proxy, or prefer
+  the async pair `mycouncil_debate_start` + `mycouncil_debate_status` over
+  HTTP.
+
+All flags have environment-variable equivalents (`MYCOUNCIL_TRANSPORT`,
+`MYCOUNCIL_HTTP_HOST`, `MYCOUNCIL_HTTP_PORT`, `MYCOUNCIL_HTTP_PATH`) — see
+[Environment variables](#environment-variables).
 
 ## Tools
 
@@ -96,6 +160,10 @@ from the tier locally; the agent never sees specific provider names.
 |---|---|---|---|
 | `MYCOUNCIL_API_KEY` | yes | — | Your `mc_*` key from Account → API. |
 | `MYCOUNCIL_BASE_URL` | no | `https://app.mycouncil.xyz` | Override for staging / self-hosted. |
+| `MYCOUNCIL_TRANSPORT` | no | `stdio` | `stdio` or `streamable-http`. Overridden by `--transport`. |
+| `MYCOUNCIL_HTTP_HOST` | no | `127.0.0.1` | Bind host for streamable-http. Overridden by `--host`. |
+| `MYCOUNCIL_HTTP_PORT` | no | `8000` | Bind port for streamable-http. Overridden by `--port`. |
+| `MYCOUNCIL_HTTP_PATH` | no | `/mcp` | Endpoint path for streamable-http. Overridden by `--path`. |
 
 ## Examples
 

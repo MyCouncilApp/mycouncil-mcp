@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -16,7 +18,11 @@ POLL_INTERVAL_SECONDS = 6
 DEFAULT_TIMEOUT_MINUTES = 20
 TERMINAL_STATUSES = {"complete", "failed"}
 
-mcp = FastMCP("mycouncil")
+# stateless_http=True makes the streamable-http transport create a fresh
+# transport per request (no session affinity) — the right model for a thin
+# stateless relay and the cleanest path for concurrent debates. It is a no-op
+# for the default stdio transport.
+mcp = FastMCP("mycouncil", stateless_http=True)
 
 
 # Orientation guide for agents. Returned by mycouncil_info. Kept as a
@@ -519,7 +525,59 @@ async def mycouncil_share(
 
 
 def main() -> None:
-    mcp.run()
+    """Entry point. Serves stdio by default; --transport streamable-http runs
+    the server as a long-lived HTTP service.
+
+    Identity is unchanged across transports: a single MYCOUNCIL_API_KEY from
+    the environment. streamable-http just lets one process speak HTTP natively
+    (instead of being bridged from stdio), so the async server can handle
+    concurrent debates directly.
+    """
+    parser = argparse.ArgumentParser(
+        prog="mycouncil",
+        description="myCouncil MCP server — stdio (default) or streamable-http.",
+    )
+    parser.add_argument(
+        "--transport",
+        choices=["stdio", "streamable-http"],
+        default=os.environ.get("MYCOUNCIL_TRANSPORT", "stdio"),
+        help="Transport to serve on. Default: stdio (env: MYCOUNCIL_TRANSPORT).",
+    )
+    parser.add_argument(
+        "--host",
+        default=os.environ.get("MYCOUNCIL_HTTP_HOST", "127.0.0.1"),
+        help="streamable-http bind host. Default: 127.0.0.1 "
+        "(env: MYCOUNCIL_HTTP_HOST).",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.environ.get("MYCOUNCIL_HTTP_PORT", "8000")),
+        help="streamable-http bind port. Default: 8000 (env: MYCOUNCIL_HTTP_PORT).",
+    )
+    parser.add_argument(
+        "--path",
+        default=os.environ.get("MYCOUNCIL_HTTP_PATH", "/mcp"),
+        help="streamable-http endpoint path. Default: /mcp "
+        "(env: MYCOUNCIL_HTTP_PATH).",
+    )
+    args = parser.parse_args()
+
+    if args.transport == "stdio":
+        mcp.run("stdio")
+        return
+
+    # streamable-http: apply bind settings before run() — streamable_http_app()
+    # reads them lazily when the server starts.
+    mcp.settings.host = args.host
+    mcp.settings.port = args.port
+    mcp.settings.streamable_http_path = args.path
+    # FastMCP auto-enables a localhost-only DNS-rebinding guard. Binding to a
+    # non-loopback interface (e.g. 0.0.0.0 behind a reverse proxy) would then
+    # reject forwarded Host/Origin headers, so relax it for non-loopback binds.
+    if args.host not in ("127.0.0.1", "localhost", "::1"):
+        mcp.settings.transport_security = None
+    mcp.run("streamable-http")
 
 
 if __name__ == "__main__":

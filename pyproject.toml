@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mycouncil"
-version = "0.2.0"
+version = "0.3.0"
 description = "MCP server for myCouncil — run multi-LLM debates from Claude Code, Claude Desktop, Cursor, and other MCP clients."
 readme = "README.md"
 requires-python = ">=3.10"
