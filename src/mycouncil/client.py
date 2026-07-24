@@ -21,8 +21,10 @@ def get_base_url() -> str:
     return os.environ.get("MYCOUNCIL_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
 
 
-def get_api_key() -> str:
-    key = os.environ.get("MYCOUNCIL_API_KEY", "").strip()
+def get_api_key(explicit: str | None = None) -> str:
+    """Resolve the myCouncil API key: an explicit per-request value wins
+    over the MYCOUNCIL_API_KEY environment variable."""
+    key = (explicit or os.environ.get("MYCOUNCIL_API_KEY", "")).strip()
     if not key:
         raise RuntimeError(
             "MYCOUNCIL_API_KEY is not set. Generate a key at "
@@ -55,14 +57,16 @@ class MyCouncilClient:
     """Async client wrapping `/api/v1/*` and conversation utility endpoints."""
 
     # Process-wide cache for /api/available-models. Shared across instances
-    # because MCP-server creates a fresh client per tool call.
+    # because MCP-server creates a fresh client per tool call. Also shared
+    # across per-request API keys: the whitelist is global (server-side TOML),
+    # not per-account, so no tenant data crosses over.
     _models_cache: list[dict] | None = None
     _models_cache_ts: float = 0.0
 
-    def __init__(self, timeout_seconds: float = 60.0):
+    def __init__(self, timeout_seconds: float = 60.0, api_key: str | None = None):
         self._client = httpx.AsyncClient(
             base_url=get_base_url(),
-            headers={"Authorization": f"Bearer {get_api_key()}"},
+            headers={"Authorization": f"Bearer {get_api_key(api_key)}"},
             timeout=httpx.Timeout(timeout_seconds, connect=10.0),
         )
 

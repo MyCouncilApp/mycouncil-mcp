@@ -24,6 +24,12 @@ TERMINAL_STATUSES = {"complete", "failed"}
 # for the default stdio transport.
 mcp = FastMCP("mycouncil", stateless_http=True)
 
+# Auth mode, set by main(). "shared": every call uses the single
+# MYCOUNCIL_API_KEY from the environment (pre-0.4.0 behaviour, default).
+# "per-request" (streamable-http only): each HTTP call must carry its own
+# myCouncil key in the X-MyCouncil-Key or Authorization: Bearer header.
+_AUTH_MODE = "shared"
+
 
 # Orientation guide for agents. Returned by mycouncil_info. Kept as a
 # module constant so it's easy to update in one place.
@@ -144,6 +150,41 @@ def _error_payload(exc: Exception) -> dict[str, Any]:
     return {"error": type(exc).__name__, "detail": str(exc)}
 
 
+def _request_api_key() -> str | None:
+    """Per-call myCouncil API key, or None to use the shared env key.
+
+    In per-request mode the key comes from the current HTTP request's
+    headers. `X-MyCouncil-Key: mc_...` wins over `Authorization: Bearer
+    mc_...` — the dedicated header survives proxies that overwrite
+    Authorization with their own gateway credentials. A missing key is an
+    error rather than a fallback: silently using the operator's env key
+    would bill the wrong account.
+    """
+    if _AUTH_MODE != "per-request":
+        return None
+
+    request = None
+    try:
+        request = mcp.get_context().request_context.request
+    except ValueError:
+        pass
+    headers = getattr(request, "headers", None)
+    if headers is not None:
+        key = (headers.get("x-mycouncil-key") or "").strip()
+        if not key:
+            auth = (headers.get("authorization") or "").strip()
+            if auth.lower().startswith("bearer "):
+                key = auth[len("bearer ") :].strip()
+        if key:
+            return key
+    raise MyCouncilError(
+        401,
+        "This server runs in per-request auth mode: pass your myCouncil API "
+        "key on every HTTP call via the `X-MyCouncil-Key: mc_...` or "
+        "`Authorization: Bearer mc_...` header.",
+    )
+
+
 def _strip_models_from_config(config: dict[str, Any]) -> dict[str, Any]:
     """Remove concrete model IDs from a config returned by auto-config.
 
@@ -207,7 +248,7 @@ async def mycouncil_balance() -> dict[str, Any]:
     auto-config call). Source of truth for what is left on the account.
     """
     try:
-        async with MyCouncilClient() as client:
+        async with MyCouncilClient(api_key=_request_api_key()) as client:
             return await client.balance()
     except Exception as exc:
         return _error_payload(exc)
@@ -240,7 +281,7 @@ async def mycouncil_list_roles(
     category, scope, status, ...}.
     """
     try:
-        async with MyCouncilClient() as client:
+        async with MyCouncilClient(api_key=_request_api_key()) as client:
             roles = await client.list_roles(
                 scope=None if scope == "all" else scope
             )
@@ -282,7 +323,7 @@ async def mycouncil_auto_config(
             appropriate roles. Files are NOT uploaded by this call.
     """
     try:
-        async with MyCouncilClient() as client:
+        async with MyCouncilClient(api_key=_request_api_key()) as client:
             raw = await client.auto_config(content=content, file_names=file_names)
         # Hide concrete model IDs from the agent — replace the config payload
         # with a stripped version. Top-level fields like observation,
@@ -321,7 +362,7 @@ async def mycouncil_debate_start(
             to attach. Read from disk and uploaded as multipart.
     """
     try:
-        async with MyCouncilClient() as client:
+        async with MyCouncilClient(api_key=_request_api_key()) as client:
             prepared = await _prepare_config_for_debate(client, config)
             return await client.debate_start(
                 content=content, config=prepared, file_paths=file_paths
@@ -345,7 +386,7 @@ async def mycouncil_debate_status(job_id: str) -> dict[str, Any]:
       - error: only when status=failed
     """
     try:
-        async with MyCouncilClient() as client:
+        async with MyCouncilClient(api_key=_request_api_key()) as client:
             return await client.job(job_id)
     except Exception as exc:
         return _error_payload(exc)
@@ -395,7 +436,7 @@ async def mycouncil_debate(
             result. Default 20.
     """
     try:
-        async with MyCouncilClient() as client:
+        async with MyCouncilClient(api_key=_request_api_key()) as client:
             prepared = await _prepare_config_for_debate(client, config)
             started = await client.debate_start(
                 content=content, config=prepared, file_paths=file_paths
@@ -502,7 +543,7 @@ async def mycouncil_share(
         save_path: Where to save when `format=pdf`. Ignored otherwise.
     """
     try:
-        async with MyCouncilClient() as client:
+        async with MyCouncilClient(api_key=_request_api_key()) as client:
             if format == "link":
                 share = await client.share_enable(conversation_id)
                 return {
@@ -528,10 +569,11 @@ def main() -> None:
     """Entry point. Serves stdio by default; --transport streamable-http runs
     the server as a long-lived HTTP service.
 
-    Identity is unchanged across transports: a single MYCOUNCIL_API_KEY from
-    the environment. streamable-http just lets one process speak HTTP natively
-    (instead of being bridged from stdio), so the async server can handle
-    concurrent debates directly.
+    Auth: by default every call uses the single MYCOUNCIL_API_KEY from the
+    environment, regardless of transport. `--auth per-request`
+    (streamable-http only) flips that: each HTTP call must carry its own
+    myCouncil key in the X-MyCouncil-Key or Authorization: Bearer header —
+    one hosted wrapper serving many myCouncil accounts.
     """
     parser = argparse.ArgumentParser(
         prog="mycouncil",
@@ -561,7 +603,31 @@ def main() -> None:
         help="streamable-http endpoint path. Default: /mcp "
         "(env: MYCOUNCIL_HTTP_PATH).",
     )
+    parser.add_argument(
+        "--auth",
+        choices=["shared", "per-request"],
+        default=os.environ.get("MYCOUNCIL_HTTP_AUTH", "shared"),
+        help="streamable-http auth mode: 'shared' uses MYCOUNCIL_API_KEY from "
+        "the environment for every call; 'per-request' requires each HTTP "
+        "call to carry its own key in the X-MyCouncil-Key or "
+        "Authorization: Bearer header. Default: shared "
+        "(env: MYCOUNCIL_HTTP_AUTH).",
+    )
     args = parser.parse_args()
+
+    # argparse validates `choices` only for values given on the command line;
+    # env-sourced defaults bypass it. A typo'd auth mode must fail loudly, not
+    # silently run as shared.
+    if args.auth not in ("shared", "per-request"):
+        parser.error(
+            f"invalid auth mode {args.auth!r} (check MYCOUNCIL_HTTP_AUTH): "
+            "expected 'shared' or 'per-request'"
+        )
+    if args.auth == "per-request" and args.transport == "stdio":
+        parser.error("--auth per-request requires --transport streamable-http")
+
+    global _AUTH_MODE
+    _AUTH_MODE = args.auth
 
     if args.transport == "stdio":
         mcp.run("stdio")

@@ -9,6 +9,13 @@ just relays calls.
 
 ## What's new
 
+**0.4.0** — optional **per-request auth** for streamable-http
+(`--auth per-request`). Each HTTP call carries its own myCouncil API key in
+the `X-MyCouncil-Key` (or `Authorization: Bearer`) header, so one hosted
+wrapper can serve many myCouncil accounts — each caller spends their own
+rounds. Default is unchanged (`--auth shared`, single env key); stdio is
+unchanged. See [Per-request auth](#per-request-auth-multi-account).
+
 **0.3.0** — optional **streamable-http** transport
 (`--transport streamable-http`). Run the server as one long-lived HTTP
 service instead of a per-client stdio process — the async server handles
@@ -90,13 +97,63 @@ the running service):
 claude mcp add --transport http mycouncil http://127.0.0.1:8000/mcp
 ```
 
-This is **single-identity**: every request uses the one `MYCOUNCIL_API_KEY`
-the process was started with — all callers share that account's rounds and
-balance. It is not multi-tenant; it just lets one process speak HTTP
-natively so concurrent debates run on the async event loop without a
-stdio→HTTP bridge funnelling them through a single pipe. The transport runs
-in stateless mode (a fresh transport per request), so there is no session
-affinity to manage.
+By default this is **single-identity** (`--auth shared`): every request uses
+the one `MYCOUNCIL_API_KEY` the process was started with — all callers share
+that account's rounds and balance. The transport runs in stateless mode (a
+fresh transport per request), so there is no session affinity to manage. For
+one wrapper serving many accounts, see
+[Per-request auth](#per-request-auth-multi-account).
+
+### Per-request auth (multi-account)
+
+`--auth per-request` makes each HTTP call authenticate itself: the caller
+passes their own myCouncil key on every request, and the wrapper uses it for
+exactly that call. No key is read from the environment; different callers
+spend their own rounds.
+
+```bash
+uvx mycouncil --transport streamable-http --host 0.0.0.0 --port 8000 \
+  --auth per-request
+```
+
+The key is taken from (first match wins):
+
+1. `X-MyCouncil-Key: mc_...` — dedicated header; use it when a proxy in
+   front of the wrapper already occupies `Authorization` for its own auth.
+2. `Authorization: Bearer mc_...` — the standard form.
+
+Client config example (any streamable-http MCP client that supports custom
+headers):
+
+```json
+{
+  "mcpServers": {
+    "mycouncil": {
+      "type": "streamable-http",
+      "url": "https://your-host.example/mcp",
+      "headers": { "Authorization": "Bearer mc_your_key_here" }
+    }
+  }
+}
+```
+
+Or with the Claude Code CLI:
+
+```bash
+claude mcp add --transport http mycouncil https://your-host.example/mcp \
+  --header "Authorization: Bearer mc_your_key_here"
+```
+
+Calls without a key are rejected with a structured
+`{"error": "api_error", "status_code": 401, ...}` payload — there is no
+silent fallback to an environment key, so a misconfigured client can never
+spend someone else's rounds. `--auth per-request` requires
+`--transport streamable-http` (stdio has no request headers; startup fails
+otherwise).
+
+**Always put TLS in front of this mode.** API keys travel in request
+headers on every call; terminate HTTPS at your reverse proxy. Plain
+`http://` is acceptable only on `127.0.0.1`.
 
 Notes:
 
@@ -112,7 +169,8 @@ Notes:
   HTTP.
 
 All flags have environment-variable equivalents (`MYCOUNCIL_TRANSPORT`,
-`MYCOUNCIL_HTTP_HOST`, `MYCOUNCIL_HTTP_PORT`, `MYCOUNCIL_HTTP_PATH`) — see
+`MYCOUNCIL_HTTP_HOST`, `MYCOUNCIL_HTTP_PORT`, `MYCOUNCIL_HTTP_PATH`,
+`MYCOUNCIL_HTTP_AUTH`) — see
 [Environment variables](#environment-variables).
 
 ## Tools
@@ -158,12 +216,13 @@ from the tier locally; the agent never sees specific provider names.
 
 | Variable | Required | Default | Notes |
 |---|---|---|---|
-| `MYCOUNCIL_API_KEY` | yes | — | Your `mc_*` key from Account → API. |
+| `MYCOUNCIL_API_KEY` | yes* | — | Your `mc_*` key from Account → API. *Not read in `per-request` auth mode — keys arrive in request headers instead. |
 | `MYCOUNCIL_BASE_URL` | no | `https://app.mycouncil.xyz` | Override for staging / self-hosted. |
 | `MYCOUNCIL_TRANSPORT` | no | `stdio` | `stdio` or `streamable-http`. Overridden by `--transport`. |
 | `MYCOUNCIL_HTTP_HOST` | no | `127.0.0.1` | Bind host for streamable-http. Overridden by `--host`. |
 | `MYCOUNCIL_HTTP_PORT` | no | `8000` | Bind port for streamable-http. Overridden by `--port`. |
 | `MYCOUNCIL_HTTP_PATH` | no | `/mcp` | Endpoint path for streamable-http. Overridden by `--path`. |
+| `MYCOUNCIL_HTTP_AUTH` | no | `shared` | `shared` or `per-request` (streamable-http only). Overridden by `--auth`. |
 
 ## Examples
 
