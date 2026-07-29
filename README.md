@@ -9,6 +9,14 @@ just relays calls.
 
 ## What's new
 
+**0.5.0** — optional **RAG prelude** (`--rag-prelude`). The debate tools
+gain two optional per-call parameters — `rag_access_token` + `rag_base_url`.
+When a call carries both, the wrapper runs one hybrid search over an
+external stakeholder-call RAG corpus and prepends the found excerpts to the
+debate content, so the council grounds its takes in what stakeholders
+actually said. Off by default; without the flag the tool schemas are
+unchanged. See [RAG prelude](#rag-prelude).
+
 **0.4.0** — optional **per-request auth** for streamable-http
 (`--auth per-request`). Each HTTP call carries its own myCouncil API key in
 the `X-MyCouncil-Key` (or `Authorization: Bearer`) header, so one hosted
@@ -173,6 +181,45 @@ All flags have environment-variable equivalents (`MYCOUNCIL_TRANSPORT`,
 `MYCOUNCIL_HTTP_AUTH`) — see
 [Environment variables](#environment-variables).
 
+## RAG prelude
+
+`--rag-prelude` (env: `MYCOUNCIL_RAG_PRELUDE=1`) adds two **optional
+per-call parameters** to `mycouncil_debate` and `mycouncil_debate_start`:
+
+| Parameter | What it is |
+|---|---|
+| `rag_access_token` | Short-lived (~30 min) bearer token for the RAG service, issued per debate. |
+| `rag_base_url` | Base URL of the RAG service, e.g. `https://rag.example.com`. |
+
+When a call carries **both**, the wrapper runs one hybrid search
+(`POST {rag_base_url}/v1/search`, collection `stt-calls`, `top_k` 5) and
+sends the debate content to the server as:
+
+```
+### Question
+<original content>
+
+### Useful info
+1. <excerpt from a stakeholder call> (score 0.91; source: ...)
+2. ...
+```
+
+Works on both transports (the parameters travel in the tool call, not in
+HTTP headers, so stdio works too) and composes with `--auth per-request`.
+Behaviour details:
+
+- Both parameters omitted (or only one given) → plain debate, exactly as
+  without the flag. RAG is an enrichment, not a dependency.
+- The result carries `rag_prelude: "applied"` or
+  `rag_prelude: "skipped (...)"` so integrators can verify the prelude ran.
+- Failure policy: `401` from RAG → no retry (token is dead), run the debate
+  plain; network errors / `5xx` → one retry with backoff, then run plain.
+  A RAG outage never fails a debate.
+- The token is used once for the search and is never logged, stored, or
+  echoed into results.
+- Without `--rag-prelude` the parameters don't exist in the tool schemas —
+  agents can't pass them by accident.
+
 ## Tools
 
 | Tool | What it does |
@@ -223,6 +270,7 @@ from the tier locally; the agent never sees specific provider names.
 | `MYCOUNCIL_HTTP_PORT` | no | `8000` | Bind port for streamable-http. Overridden by `--port`. |
 | `MYCOUNCIL_HTTP_PATH` | no | `/mcp` | Endpoint path for streamable-http. Overridden by `--path`. |
 | `MYCOUNCIL_HTTP_AUTH` | no | `shared` | `shared` or `per-request` (streamable-http only). Overridden by `--auth`. |
+| `MYCOUNCIL_RAG_PRELUDE` | no | off | `1`/`true` enables the [RAG prelude](#rag-prelude) parameters on the debate tools. Overridden by `--rag-prelude`. |
 
 ## Examples
 

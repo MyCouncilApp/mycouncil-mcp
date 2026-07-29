@@ -12,6 +12,7 @@ from typing import Any, Literal
 from mcp.server.fastmcp import FastMCP
 
 from .client import MyCouncilClient, MyCouncilError
+from .rag import fetch_rag_prelude, with_rag_prelude
 from .tier import fill_models_by_tier
 
 POLL_INTERVAL_SECONDS = 6
@@ -227,6 +228,23 @@ async def _prepare_config_for_debate(
         return config
     models = await client.list_models()
     return fill_models_by_tier(config, models)
+
+
+async def _maybe_rag_prelude(
+    content: str, token: str | None, base_url: str | None
+) -> tuple[str, str | None]:
+    """Enrich debate content with RAG excerpts when both params are present.
+
+    Returns (content, status): status is None when RAG wasn't requested,
+    otherwise "applied" / "skipped (...)" — surfaced in the tool result so
+    integrators can verify the prelude ran without us echoing the token.
+    """
+    if not (token and base_url):
+        return content, None
+    prelude = await fetch_rag_prelude(base_url, token, content)
+    if prelude:
+        return with_rag_prelude(content, prelude), "applied"
+    return content, "skipped (RAG search failed or returned no excerpts)"
 
 
 @mcp.tool()
@@ -565,6 +583,90 @@ async def mycouncil_share(
         return _error_payload(exc)
 
 
+# --- RAG prelude tool variants ---------------------------------------------
+# Registered by main() in place of the plain debate tools when --rag-prelude
+# is on. Same behaviour plus two optional per-call parameters: when a call
+# carries both, the wrapper searches the stakeholder-call corpus once and
+# prepends the excerpts to the debate content before it reaches the server.
+
+_RAG_DOC_ADDENDUM = """
+
+    RAG prelude (enabled on this server): optionally pass BOTH
+    `rag_access_token` (short-lived bearer token, ~30 min) and
+    `rag_base_url` (e.g. https://rag.example.com). The wrapper then runs
+    one hybrid search over the stakeholder-call corpus and prepends the
+    found excerpts to the debate content as:
+
+        ### Question
+        <content>
+
+        ### Useful info
+        <excerpts>
+
+    Omit both to run a plain debate. The token is used only for this call
+    and is never logged, stored, or echoed back; the result carries
+    `rag_prelude: "applied" | "skipped (...)"` so integrators can verify
+    the prelude ran.
+    """
+
+
+def _with_rag_status(
+    result: dict[str, Any], rag_status: str | None
+) -> dict[str, Any]:
+    if rag_status and isinstance(result, dict) and "error" not in result:
+        result["rag_prelude"] = rag_status
+    return result
+
+
+async def _mycouncil_debate_rag(
+    content: str,
+    return_as: Literal["pdf", "transcript", "link"] = "pdf",
+    config: dict[str, Any] | None = None,
+    file_paths: list[str] | None = None,
+    save_path: str | None = None,
+    timeout_minutes: int = DEFAULT_TIMEOUT_MINUTES,
+    rag_access_token: str | None = None,
+    rag_base_url: str | None = None,
+) -> dict[str, Any]:
+    content, rag_status = await _maybe_rag_prelude(
+        content, rag_access_token, rag_base_url
+    )
+    result = await mycouncil_debate(
+        content, return_as, config, file_paths, save_path, timeout_minutes
+    )
+    return _with_rag_status(result, rag_status)
+
+
+async def _mycouncil_debate_start_rag(
+    content: str,
+    config: dict[str, Any] | None = None,
+    file_paths: list[str] | None = None,
+    rag_access_token: str | None = None,
+    rag_base_url: str | None = None,
+) -> dict[str, Any]:
+    content, rag_status = await _maybe_rag_prelude(
+        content, rag_access_token, rag_base_url
+    )
+    result = await mycouncil_debate_start(content, config, file_paths)
+    return _with_rag_status(result, rag_status)
+
+
+_mycouncil_debate_rag.__doc__ = (mycouncil_debate.__doc__ or "") + _RAG_DOC_ADDENDUM
+_mycouncil_debate_start_rag.__doc__ = (
+    mycouncil_debate_start.__doc__ or ""
+) + _RAG_DOC_ADDENDUM
+
+
+def _enable_rag_prelude() -> None:
+    """Swap the debate tools for the variants exposing rag_* parameters."""
+    for name, fn in (
+        ("mycouncil_debate", _mycouncil_debate_rag),
+        ("mycouncil_debate_start", _mycouncil_debate_start_rag),
+    ):
+        mcp.remove_tool(name)
+        mcp.add_tool(fn, name=name)
+
+
 def main() -> None:
     """Entry point. Serves stdio by default; --transport streamable-http runs
     the server as a long-lived HTTP service.
@@ -613,6 +715,16 @@ def main() -> None:
         "Authorization: Bearer header. Default: shared "
         "(env: MYCOUNCIL_HTTP_AUTH).",
     )
+    parser.add_argument(
+        "--rag-prelude",
+        action="store_true",
+        default=os.environ.get("MYCOUNCIL_RAG_PRELUDE", "").strip().lower()
+        in ("1", "true", "yes", "on"),
+        help="Expose optional rag_access_token / rag_base_url parameters on "
+        "the debate tools; when a call carries both, the wrapper searches "
+        "the stakeholder-call RAG once and prepends the excerpts to the "
+        "debate content. Default: off (env: MYCOUNCIL_RAG_PRELUDE).",
+    )
     args = parser.parse_args()
 
     # argparse validates `choices` only for values given on the command line;
@@ -628,6 +740,9 @@ def main() -> None:
 
     global _AUTH_MODE
     _AUTH_MODE = args.auth
+
+    if args.rag_prelude:
+        _enable_rag_prelude()
 
     if args.transport == "stdio":
         mcp.run("stdio")
